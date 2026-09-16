@@ -6,7 +6,7 @@
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 const { GoogleGenAI, Type } = require("@google/genai");
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 
 const pool = require("../db/pool");
 
@@ -17,26 +17,22 @@ const router = express.Router();
    to be useful. (WhatsApp notifications have been removed —
    this route only ever emails.)
 
-   Email transport uses MAIL_USER / MAIL_PASS (Gmail service).
-   MAIL_PASS must be a Gmail App Password, not a normal login
-   password, since Gmail blocks regular password auth for SMTP.
+   Sends via Resend's HTTPS API rather than SMTP — Render's free
+   tier blocks outbound SMTP ports (25/465/587) as of Sep 26,
+   2025, so Gmail SMTP no longer works here. Resend sends over
+   HTTPS (443), which is never blocked.
    ========================================================= */
-const mailTransporter =
-  process.env.MAIL_USER && process.env.MAIL_PASS
-    ? nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-          user: process.env.MAIL_USER,
-          pass: process.env.MAIL_PASS,
-        },
-      })
-    : null;
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
-if (!mailTransporter) {
+if (!resend) {
   console.warn(
-    "[aiChat] MAIL_USER/MAIL_PASS are not set — recruiter interest will be saved to the DB, but no email notifications (candidate or recruiter) will be sent until these are configured."
+    "[aiChat] RESEND_API_KEY is not set — recruiter interest will be saved to the DB, but no email notifications (candidate or recruiter) will be sent until this is configured."
   );
 }
+
+// Sender address for outbound notifications. Swap to your own verified
+// domain in Resend once set up, e.g. "Portfolio Assistant <notify@yourdomain.com>".
+const MAIL_FROM = "Portfolio Assistant <onboarding@resend.dev>";
 
 /* =========================================================
    Self-healing schema — the recruiter-interest flow depends on
@@ -69,7 +65,7 @@ async function bootstrapSchema() {
 bootstrapSchema();
 
 async function notifyCandidateByEmail({ candidateEmail, recruiterEmail, recruiterPhone, message }) {
-  if (!mailTransporter || !candidateEmail) return;
+  if (!resend || !candidateEmail) return;
   try {
     const contactLines = [
       recruiterPhone ? `Their phone: ${recruiterPhone}` : null,
@@ -78,14 +74,16 @@ async function notifyCandidateByEmail({ candidateEmail, recruiterEmail, recruite
       .filter(Boolean)
       .join("\n");
 
-    await mailTransporter.sendMail({
-      from: process.env.MAIL_USER,
+    const { error } = await resend.emails.send({
+      from: MAIL_FROM,
       to: candidateEmail,
       subject: "Someone is interested in reaching out to you",
       text: `A visitor on your portfolio left their contact for you.\n\n${contactLines}\n\nContext: ${
         message || "(no additional context given)"
       }`,
     });
+
+    if (error) throw error;
   } catch (err) {
     console.error("Failed to email candidate about new lead:", err);
     throw err;
@@ -93,16 +91,18 @@ async function notifyCandidateByEmail({ candidateEmail, recruiterEmail, recruite
 }
 
 async function notifyRecruiterAcknowledgement({ recruiterEmail, candidateName }) {
-  if (!mailTransporter || !recruiterEmail) return;
+  if (!resend || !recruiterEmail) return;
   try {
-    await mailTransporter.sendMail({
-      from: process.env.MAIL_USER,
+    const { error } = await resend.emails.send({
+      from: MAIL_FROM,
       to: recruiterEmail,
       subject: `Thanks for reaching out${candidateName ? ` to ${candidateName}` : ""}`,
       text: `Hi,\n\nThanks for your interest — this has been passed along${
         candidateName ? ` to ${candidateName}` : ""
       } and they'll get back to you soon.\n\nBest,\nXA (portfolio assistant)`,
     });
+
+    if (error) throw error;
   } catch (err) {
     console.error("Failed to email recruiter acknowledgement:", err);
     throw err;
@@ -465,8 +465,8 @@ async function record_recruiter_interest({ phone, email, message } = {}, ip) {
   const profileRes = await pool.query(`SELECT name, email, phone FROM profile LIMIT 1;`);
   const candidate = profileRes.rows[0] || null;
 
-  if (!mailTransporter || !candidate?.email) {
-    // No transporter configured — lead is saved either way.
+  if (!resend || !candidate?.email) {
+    // No Resend key configured — lead is saved either way.
     return { saved: true, notified: false, contact: candidate };
   }
 

@@ -11,7 +11,8 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const helmet = require("helmet");
 
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -51,23 +52,6 @@ const pool = require("./db/pool");
 app.use("/api", require("./routes/aiChat"));
 app.use("/api", require("./routes/googleAuthLog"));
 
-// Mail transporter — credentials come from .env, never hardcoded here.
-// Add to .env:
-//   MAIL_USER=rishabhgarai7@gmail.com
-//   MAIL_PASS=your_app_password_here
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  secure: true,
-  port: 465,
-  family: 4, // force IPv4 — Render has no IPv6 egress, so IPv6-resolved Gmail addresses fail with ENETUNREACH
-  auth: {
-    user: process.env.MAIL_USER,
-    pass: process.env.MAIL_PASS,
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 10000,
-});
 
 // Small helper: groups a flat "items" array under their parent category,
 // in the same order the categories came back in (already ORDER BY position).
@@ -426,8 +410,8 @@ app.get("/api/resume", async (req, res) => {
 // add a table back and INSERT here alongside the sendMail call.
 
 const contactLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000, 
-  max: 10, 
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -435,12 +419,13 @@ const contactLimiter = rateLimit({
     error: "Too many messages sent. Please try again after 1 day.",
   },
 });
+ 
 app.post("/api/contact", contactLimiter, async (req, res) => {
   console.log("[contact] ---- New request received ----");
   console.log("[contact] Body received:", { ...req.body, message: req.body?.message ? "(present)" : req.body?.message });
-
+ 
   const { name, email, message } = req.body;
-
+ 
   if (!name || !email || !message) {
     console.log("[contact] Validation failed — missing field(s):", {
       hasName: !!name,
@@ -450,50 +435,40 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     return res.status(400).json({ ok: false, error: "name, email, and message are required" });
   }
   console.log("[contact] Validation passed.");
-
-  // --- Sanity check: is transporter even defined at this point? ---
-  console.log("[contact] typeof transporter:", typeof transporter);
-  if (typeof transporter === "undefined" || transporter === null) {
-    console.error(
-      "[contact] FATAL: `transporter` is undefined/null. It was never created, or MAIL_USER/MAIL_PASS " +
-      "were missing when it was constructed. This will throw before sendMail runs."
-    );
+ 
+  // --- Sanity check: is Resend configured? ---
+  console.log("[contact] RESEND_API_KEY set:", !!process.env.RESEND_API_KEY);
+  if (!process.env.RESEND_API_KEY) {
+    console.error("[contact] FATAL: RESEND_API_KEY is not set. Cannot send mail.");
     return res.status(500).json({
       ok: false,
       error: "Mail service is not configured on the server.",
     });
   }
-
-  // --- Confirm env vars are actually present in this deployed environment ---
-  console.log("[contact] MAIL_USER set:", !!process.env.MAIL_USER);
-  console.log("[contact] MAIL_PASS set:", !!process.env.MAIL_PASS);
-  if (process.env.MAIL_USER) {
-    console.log("[contact] MAIL_USER value (masked):", process.env.MAIL_USER.replace(/(.{2}).+(@.+)/, "$1***$2"));
-  }
-
+ 
   try {
     console.log("[contact] Querying profile table for recipient email...");
     const profileResult = await pool.query(`SELECT email FROM profile LIMIT 1;`);
     console.log("[contact] profileResult.rows:", profileResult.rows);
-
+ 
     if (profileResult.rows.length === 0 || !profileResult.rows[0].email) {
       console.error("[contact] No recipient email found in profile table.");
       return res.status(500).json({ ok: false, error: "Recipient email not configured" });
     }
-
+ 
     const recipientEmail = profileResult.rows[0].email;
     console.log("[contact] Recipient email resolved:", recipientEmail);
-
+ 
     const mailOptions = {
-      from: `"Portfolio Contact Form" <${process.env.MAIL_USER}>`,
+      from: "Portfolio Contact Form <onboarding@resend.dev>", // swap to your verified domain later, e.g. "Portfolio <contact@yourdomain.com>"
       to: recipientEmail,
       replyTo: email,
       subject: `New portfolio message from ${name}`,
       text: `You received a new message via your portfolio contact form.
-
+ 
 Name: ${name}
 Email: ${email}
-
+ 
 Message:
 ${message}`,
       html: `
@@ -508,36 +483,35 @@ ${message}`,
         </div>
       `,
     };
-
+ 
     console.log("[contact] mailOptions built:", {
       from: mailOptions.from,
       to: mailOptions.to,
       replyTo: mailOptions.replyTo,
       subject: mailOptions.subject,
     });
-
-    console.log("[contact] Calling transporter.sendMail()...");
-    const info = await transporter.sendMail(mailOptions);
-    console.log("[contact] sendMail() resolved. info:", {
-      messageId: info?.messageId,
-      response: info?.response,
-      accepted: info?.accepted,
-      rejected: info?.rejected,
-    });
-
+ 
+    console.log("[contact] Calling resend.emails.send()...");
+    const { data, error } = await resend.emails.send(mailOptions);
+ 
+    if (error) {
+      // Resend returns errors as a value, not a thrown exception —
+      // rethrow so it lands in the same catch block as any network error.
+      console.error("[contact] Resend API returned an error:", error);
+      throw error;
+    }
+ 
+    console.log("[contact] sendMail() resolved. data:", data);
     console.log("[contact] SUCCESS — replying 200 to client.");
     res.json({ ok: true, message: "Your message was sent successfully!" });
   } catch (err) {
     console.error("[contact] ERROR CAUGHT ------------------------------");
     console.error("[contact] err.message:", err?.message);
     console.error("[contact] err.name:", err?.name);
-    console.error("[contact] err.code:", err?.code);        // e.g. EAUTH, ECONNECTION, ETIMEDOUT
-    console.error("[contact] err.command:", err?.command);  // SMTP command that failed, if any
-    console.error("[contact] err.response:", err?.response); // raw SMTP server response text
-    console.error("[contact] err.responseCode:", err?.responseCode); // SMTP numeric code, e.g. 535
+    console.error("[contact] err.statusCode:", err?.statusCode); // Resend uses statusCode, not SMTP-style codes
     console.error("[contact] Full error object:", err);
     console.error("[contact] ------------------------------------------");
-
+ 
     res.status(500).json({
       ok: false,
       error: "We couldn't send your message right now. Please try again in a moment.",

@@ -27,7 +27,7 @@ app.use(helmet());
 // the browser will silently block them, which is why the Google login route
 // never received requests before.
 const ALLOWED_ORIGINS = [
-  "https://rishabh-garai.vercel.app/", // production frontend (Vercel)
+  "https://rishabh-garai.vercel.app", // production frontend (Vercel)
   "http://localhost:5173",            // local Vite dev server
   "http://localhost:3000",            // in case you also run something on 3000
   // "https://your-custom-domain.com", // add more as needed

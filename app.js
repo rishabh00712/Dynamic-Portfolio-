@@ -11,9 +11,14 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const helmet = require("helmet");
 
-const { Resend } = require("resend");
-const resend = new Resend(process.env.RESEND_API_KEY);
-
+const brevo = require("@getbrevo/brevo");
+ // Set up the Brevo API client once, outside the route handler
+const brevoClient = new brevo.TransactionalEmailsApi();
+brevoClient.setApiKey(
+  brevo.TransactionalEmailsApiApiKeys.apiKey,
+  process.env.BREVO_API_KEY
+);
+ 
 const app = express();
 const PORT = process.env.PORT || 5000;
 app.set("trust proxy", 1);
@@ -436,10 +441,10 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
   }
   console.log("[contact] Validation passed.");
  
-  // --- Sanity check: is Resend configured? ---
-  console.log("[contact] RESEND_API_KEY set:", !!process.env.RESEND_API_KEY);
-  if (!process.env.RESEND_API_KEY) {
-    console.error("[contact] FATAL: RESEND_API_KEY is not set. Cannot send mail.");
+  // --- Sanity check: is Brevo configured? ---
+  console.log("[contact] BREVO_API_KEY set:", !!process.env.BREVO_API_KEY);
+  if (!process.env.BREVO_API_KEY) {
+    console.error("[contact] FATAL: BREVO_API_KEY is not set. Cannot send mail.");
     return res.status(500).json({
       ok: false,
       error: "Mail service is not configured on the server.",
@@ -459,56 +464,54 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     const recipientEmail = profileResult.rows[0].email;
     console.log("[contact] Recipient email resolved:", recipientEmail);
  
-    const mailOptions = {
-      from: "Portfolio Contact Form <onboarding@resend.dev>", // swap to your verified domain later, e.g. "Portfolio <contact@yourdomain.com>"
-      to: recipientEmail,
-      replyTo: email,
-      subject: `New portfolio message from ${name}`,
-      text: `You received a new message via your portfolio contact form.
+    // Build the Brevo email payload
+    const sendSmtpEmail = new brevo.SendSmtpEmail();
+ 
+    sendSmtpEmail.sender = {
+      name: "Portfolio Contact Form",
+      email: "garairishabh@gmail.com", // must match the verified sender in Brevo
+    };
+    sendSmtpEmail.to = [{ email: recipientEmail }];
+    sendSmtpEmail.replyTo = { email: email, name: name };
+    sendSmtpEmail.subject = `New portfolio message from ${name}`;
+    sendSmtpEmail.textContent = `You received a new message via your portfolio contact form.
  
 Name: ${name}
 Email: ${email}
  
 Message:
-${message}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-          <h2 style="color: #2563eb;">New Portfolio Contact Submission</h2>
-          <p><strong>Name:</strong> ${name}</p>
-          <p><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
-          <p><strong>Message:</strong></p>
-          <p style="background:#f5f5f5; padding:12px; border-radius:6px; white-space:pre-wrap;">${message}</p>
-          <hr style="border:none; border-top:1px solid #eee; margin:20px 0;" />
-          <p style="font-size:12px; color:#888;">Sent from your portfolio contact form.</p>
-        </div>
-      `,
-    };
+${message}`;
+    sendSmtpEmail.htmlContent = `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <h2 style="color: #2563eb;">New Portfolio Contact Submission</h2>
+        <p><strong>Name:</strong> ${name}</p>
+        <p><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
+        <p><strong>Message:</strong></p>
+        <p style="background:#f5f5f5; padding:12px; border-radius:6px; white-space:pre-wrap;">${message}</p>
+        <hr style="border:none; border-top:1px solid #eee; margin:20px 0;" />
+        <p style="font-size:12px; color:#888;">Sent from your portfolio contact form.</p>
+      </div>
+    `;
  
-    console.log("[contact] mailOptions built:", {
-      from: mailOptions.from,
-      to: mailOptions.to,
-      replyTo: mailOptions.replyTo,
-      subject: mailOptions.subject,
+    console.log("[contact] sendSmtpEmail built:", {
+      from: sendSmtpEmail.sender,
+      to: sendSmtpEmail.to,
+      replyTo: sendSmtpEmail.replyTo,
+      subject: sendSmtpEmail.subject,
     });
  
-    console.log("[contact] Calling resend.emails.send()...");
-    const { data, error } = await resend.emails.send(mailOptions);
+    console.log("[contact] Calling brevoClient.sendTransacEmail()...");
+    const data = await brevoClient.sendTransacEmail(sendSmtpEmail);
  
-    if (error) {
-      // Resend returns errors as a value, not a thrown exception —
-      // rethrow so it lands in the same catch block as any network error.
-      console.error("[contact] Resend API returned an error:", error);
-      throw error;
-    }
- 
-    console.log("[contact] sendMail() resolved. data:", data);
+    console.log("[contact] sendTransacEmail() resolved. data:", data.body);
     console.log("[contact] SUCCESS — replying 200 to client.");
     res.json({ ok: true, message: "Your message was sent successfully!" });
   } catch (err) {
     console.error("[contact] ERROR CAUGHT ------------------------------");
     console.error("[contact] err.message:", err?.message);
     console.error("[contact] err.name:", err?.name);
-    console.error("[contact] err.statusCode:", err?.statusCode); // Resend uses statusCode, not SMTP-style codes
+    console.error("[contact] err.statusCode:", err?.response?.statusCode ?? err?.statusCode);
+    console.error("[contact] err.response.body:", err?.response?.body);
     console.error("[contact] Full error object:", err);
     console.error("[contact] ------------------------------------------");
  

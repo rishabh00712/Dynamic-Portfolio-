@@ -11,14 +11,10 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const helmet = require("helmet");
 
-const brevo = require("@getbrevo/brevo");
- // Set up the Brevo API client once, outside the route handler
-const brevoClient = new brevo.TransactionalEmailsApi();
-brevoClient.setApiKey(
-  brevo.TransactionalEmailsApiApiKeys.apiKey,
-  process.env.BREVO_API_KEY
-);
- 
+const { BrevoClient } = require("@getbrevo/brevo");
+// Set up the Brevo API client once, outside the route handler
+const brevoClient = new BrevoClient({ apiKey: process.env.BREVO_API_KEY });
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 app.set("trust proxy", 1);
@@ -410,9 +406,9 @@ app.get("/api/resume", async (req, res) => {
 });
 
 /* ---------------- Contact form submission ---------------- */
-// Sends the submission straight to your inbox via nodemailer.
-// Table-free for now — if you also want these saved in the DB,
-// add a table back and INSERT here alongside the sendMail call.
+// Sends the submission straight to your inbox via Brevo's transactional
+// email API. Table-free for now — if you also want these saved in the DB,
+// add a table back and INSERT here alongside the send call.
 
 const contactLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000,
@@ -424,13 +420,13 @@ const contactLimiter = rateLimit({
     error: "Too many messages sent. Please try again after 1 day.",
   },
 });
- 
+
 app.post("/api/contact", contactLimiter, async (req, res) => {
   console.log("[contact] ---- New request received ----");
   console.log("[contact] Body received:", { ...req.body, message: req.body?.message ? "(present)" : req.body?.message });
- 
+
   const { name, email, message } = req.body;
- 
+
   if (!name || !email || !message) {
     console.log("[contact] Validation failed — missing field(s):", {
       hasName: !!name,
@@ -440,7 +436,7 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     return res.status(400).json({ ok: false, error: "name, email, and message are required" });
   }
   console.log("[contact] Validation passed.");
- 
+
   // --- Sanity check: is Brevo configured? ---
   console.log("[contact] BREVO_API_KEY set:", !!process.env.BREVO_API_KEY);
   if (!process.env.BREVO_API_KEY) {
@@ -450,60 +446,60 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
       error: "Mail service is not configured on the server.",
     });
   }
- 
+
   try {
     console.log("[contact] Querying profile table for recipient email...");
     const profileResult = await pool.query(`SELECT email FROM profile LIMIT 1;`);
     console.log("[contact] profileResult.rows:", profileResult.rows);
- 
+
     if (profileResult.rows.length === 0 || !profileResult.rows[0].email) {
       console.error("[contact] No recipient email found in profile table.");
       return res.status(500).json({ ok: false, error: "Recipient email not configured" });
     }
- 
+
     const recipientEmail = profileResult.rows[0].email;
     console.log("[contact] Recipient email resolved:", recipientEmail);
- 
-    // Build the Brevo email payload
-    const sendSmtpEmail = new brevo.SendSmtpEmail();
- 
-    sendSmtpEmail.sender = {
-      name: "Portfolio Contact Form",
-      email: "garairishabh@gmail.com", // must match the verified sender in Brevo
-    };
-    sendSmtpEmail.to = [{ email: recipientEmail }];
-    sendSmtpEmail.replyTo = { email: email, name: name };
-    sendSmtpEmail.subject = `New portfolio message from ${name}`;
-    sendSmtpEmail.textContent = `You received a new message via your portfolio contact form.
- 
+
+    // Build the Brevo email payload (v6 SDK takes a plain object, not a class instance)
+    const emailPayload = {
+      sender: {
+        name: "Portfolio Contact Form",
+        email: "garairishabh@gmail.com", // must match the verified sender in Brevo
+      },
+      to: [{ email: recipientEmail }],
+      replyTo: { email: email, name: name },
+      subject: `New portfolio message from ${name}`,
+      textContent: `You received a new message via your portfolio contact form.
+
 Name: ${name}
 Email: ${email}
- 
+
 Message:
-${message}`;
-    sendSmtpEmail.htmlContent = `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #2563eb;">New Portfolio Contact Submission</h2>
-        <p><strong>Name:</strong> ${name}</p>
-        <p><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
-        <p><strong>Message:</strong></p>
-        <p style="background:#f5f5f5; padding:12px; border-radius:6px; white-space:pre-wrap;">${message}</p>
-        <hr style="border:none; border-top:1px solid #eee; margin:20px 0;" />
-        <p style="font-size:12px; color:#888;">Sent from your portfolio contact form.</p>
-      </div>
-    `;
- 
-    console.log("[contact] sendSmtpEmail built:", {
-      from: sendSmtpEmail.sender,
-      to: sendSmtpEmail.to,
-      replyTo: sendSmtpEmail.replyTo,
-      subject: sendSmtpEmail.subject,
+${message}`,
+      htmlContent: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <h2 style="color: #2563eb;">New Portfolio Contact Submission</h2>
+          <p><strong>Name:</strong> ${name}</p>
+          <p><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
+          <p><strong>Message:</strong></p>
+          <p style="background:#f5f5f5; padding:12px; border-radius:6px; white-space:pre-wrap;">${message}</p>
+          <hr style="border:none; border-top:1px solid #eee; margin:20px 0;" />
+          <p style="font-size:12px; color:#888;">Sent from your portfolio contact form.</p>
+        </div>
+      `,
+    };
+
+    console.log("[contact] emailPayload built:", {
+      from: emailPayload.sender,
+      to: emailPayload.to,
+      replyTo: emailPayload.replyTo,
+      subject: emailPayload.subject,
     });
- 
-    console.log("[contact] Calling brevoClient.sendTransacEmail()...");
-    const data = await brevoClient.sendTransacEmail(sendSmtpEmail);
- 
-    console.log("[contact] sendTransacEmail() resolved. data:", data.body);
+
+    console.log("[contact] Calling brevoClient.transactionalEmails.sendTransacEmail()...");
+    const data = await brevoClient.transactionalEmails.sendTransacEmail(emailPayload);
+
+    console.log("[contact] sendTransacEmail() resolved. data:", data);
     console.log("[contact] SUCCESS — replying 200 to client.");
     res.json({ ok: true, message: "Your message was sent successfully!" });
   } catch (err) {
@@ -514,7 +510,7 @@ ${message}`;
     console.error("[contact] err.response.body:", err?.response?.body);
     console.error("[contact] Full error object:", err);
     console.error("[contact] ------------------------------------------");
- 
+
     res.status(500).json({
       ok: false,
       error: "We couldn't send your message right now. Please try again in a moment.",

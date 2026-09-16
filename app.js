@@ -25,7 +25,7 @@ app.use(helmet());
 // the browser will silently block them, which is why the Google login route
 // never received requests before.
 const ALLOWED_ORIGINS = [
-  "http://localhost:5173", // Vite dev server — this is what your frontend is actually running on
+  "https://rishabh-azure.vercel.app/", // Vite dev server — this is what your frontend is actually running on
   // "https://your-production-domain.com", // add your deployed frontend URL here
 ];
 

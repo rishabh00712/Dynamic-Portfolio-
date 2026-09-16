@@ -59,11 +59,12 @@ const transporter = nodemailer.createTransport({
   service: "gmail",
   secure: true,
   port: 465,
+  family: 4, // force IPv4 — Render has no IPv6 egress, so IPv6-resolved Gmail addresses fail with ENETUNREACH
   auth: {
     user: process.env.MAIL_USER,
     pass: process.env.MAIL_PASS,
   },
-  connectionTimeout: 10000, // fail fast instead of hanging if port 465 is blocked
+  connectionTimeout: 10000,
   greetingTimeout: 10000,
   socketTimeout: 10000,
 });

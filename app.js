@@ -15,7 +15,7 @@ const nodemailer = require("nodemailer");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-app.set("trust proxy", true);
+app.set("trust proxy", 1);
 
 /* ---------------- Health / security middleware ---------------- */
 app.use(helmet());
@@ -63,6 +63,9 @@ const transporter = nodemailer.createTransport({
     user: process.env.MAIL_USER,
     pass: process.env.MAIL_PASS,
   },
+  connectionTimeout: 10000, // fail fast instead of hanging if port 465 is blocked
+  greetingTimeout: 10000,
+  socketTimeout: 10000,
 });
 
 // Small helper: groups a flat "items" array under their parent category,

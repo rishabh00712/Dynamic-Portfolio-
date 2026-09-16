@@ -6,7 +6,7 @@
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 const { GoogleGenAI, Type } = require("@google/genai");
-const { Resend } = require("resend");
+const { BrevoClient } = require("@getbrevo/brevo");
 
 const pool = require("../db/pool");
 
@@ -17,22 +17,26 @@ const router = express.Router();
    to be useful. (WhatsApp notifications have been removed —
    this route only ever emails.)
 
-   Sends via Resend's HTTPS API rather than SMTP — Render's free
-   tier blocks outbound SMTP ports (25/465/587) as of Sep 26,
-   2025, so Gmail SMTP no longer works here. Resend sends over
-   HTTPS (443), which is never blocked.
+   Sends via Brevo's HTTPS API rather than SMTP — Render's free
+   tier blocks outbound SMTP ports (25/465/587), so Gmail SMTP
+   doesn't work here. Brevo sends over HTTPS (443), which is
+   never blocked. Unlike Resend's testing mode, a verified
+   Brevo sender can send to any recipient, not just your own
+   signup email.
    ========================================================= */
-const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+const brevoClient = process.env.BREVO_API_KEY
+  ? new BrevoClient({ apiKey: process.env.BREVO_API_KEY })
+  : null;
 
-if (!resend) {
+if (!brevoClient) {
   console.warn(
-    "[aiChat] RESEND_API_KEY is not set — recruiter interest will be saved to the DB, but no email notifications (candidate or recruiter) will be sent until this is configured."
+    "[aiChat] BREVO_API_KEY is not set — recruiter interest will be saved to the DB, but no email notifications (candidate or recruiter) will be sent until this is configured."
   );
 }
 
-// Sender address for outbound notifications. Swap to your own verified
-// domain in Resend once set up, e.g. "Portfolio Assistant <notify@yourdomain.com>".
-const MAIL_FROM = "Portfolio Assistant <onboarding@resend.dev>";
+// Sender address for outbound notifications — must match a verified
+// sender in your Brevo account (Settings -> Senders, domains, IPs).
+const MAIL_FROM = { name: "Portfolio Assistant", email: "garairishabh@gmail.com" };
 
 /* =========================================================
    Self-healing schema — the recruiter-interest flow depends on
@@ -65,7 +69,7 @@ async function bootstrapSchema() {
 bootstrapSchema();
 
 async function notifyCandidateByEmail({ candidateEmail, recruiterEmail, recruiterPhone, message }) {
-  if (!resend || !candidateEmail) return;
+  if (!brevoClient || !candidateEmail) return;
   try {
     const contactLines = [
       recruiterPhone ? `Their phone: ${recruiterPhone}` : null,
@@ -74,37 +78,33 @@ async function notifyCandidateByEmail({ candidateEmail, recruiterEmail, recruite
       .filter(Boolean)
       .join("\n");
 
-    const { error } = await resend.emails.send({
-      from: MAIL_FROM,
-      to: candidateEmail,
+    await brevoClient.transactionalEmails.sendTransacEmail({
+      sender: MAIL_FROM,
+      to: [{ email: candidateEmail }],
       subject: "Someone is interested in reaching out to you",
-      text: `A visitor on your portfolio left their contact for you.\n\n${contactLines}\n\nContext: ${
+      textContent: `A visitor on your portfolio left their contact for you.\n\n${contactLines}\n\nContext: ${
         message || "(no additional context given)"
       }`,
     });
-
-    if (error) throw error;
   } catch (err) {
-    console.error("Failed to email candidate about new lead:", err);
+    console.error("Failed to email candidate about new lead:", err?.response?.body || err);
     throw err;
   }
 }
 
 async function notifyRecruiterAcknowledgement({ recruiterEmail, candidateName }) {
-  if (!resend || !recruiterEmail) return;
+  if (!brevoClient || !recruiterEmail) return;
   try {
-    const { error } = await resend.emails.send({
-      from: MAIL_FROM,
-      to: recruiterEmail,
+    await brevoClient.transactionalEmails.sendTransacEmail({
+      sender: MAIL_FROM,
+      to: [{ email: recruiterEmail }],
       subject: `Thanks for reaching out${candidateName ? ` to ${candidateName}` : ""}`,
-      text: `Hi,\n\nThanks for your interest — this has been passed along${
+      textContent: `Hi,\n\nThanks for your interest — this has been passed along${
         candidateName ? ` to ${candidateName}` : ""
       } and they'll get back to you soon.\n\nBest,\nXA (portfolio assistant)`,
     });
-
-    if (error) throw error;
   } catch (err) {
-    console.error("Failed to email recruiter acknowledgement:", err);
+    console.error("Failed to email recruiter acknowledgement:", err?.response?.body || err);
     throw err;
   }
 }
@@ -465,8 +465,8 @@ async function record_recruiter_interest({ phone, email, message } = {}, ip) {
   const profileRes = await pool.query(`SELECT name, email, phone FROM profile LIMIT 1;`);
   const candidate = profileRes.rows[0] || null;
 
-  if (!resend || !candidate?.email) {
-    // No Resend key configured — lead is saved either way.
+  if (!brevoClient || !candidate?.email) {
+    // No Brevo key configured — lead is saved either way.
     return { saved: true, notified: false, contact: candidate };
   }
 

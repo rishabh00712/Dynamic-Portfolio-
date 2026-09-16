@@ -92,23 +92,6 @@ async function notifyCandidateByEmail({ candidateEmail, recruiterEmail, recruite
   }
 }
 
-async function notifyRecruiterAcknowledgement({ recruiterEmail, candidateName }) {
-  if (!brevoClient || !recruiterEmail) return;
-  try {
-    await brevoClient.transactionalEmails.sendTransacEmail({
-      sender: MAIL_FROM,
-      to: [{ email: recruiterEmail }],
-      subject: `Thanks for reaching out${candidateName ? ` to ${candidateName}` : ""}`,
-      textContent: `Hi,\n\nThanks for your interest — this has been passed along${
-        candidateName ? ` to ${candidateName}` : ""
-      } and they'll get back to you soon.\n\nBest,\nXA (portfolio assistant)`,
-    });
-  } catch (err) {
-    console.error("Failed to email recruiter acknowledgement:", err?.response?.body || err);
-    throw err;
-  }
-}
-
 // Native Gemini client — reads GEMINI_API_KEY directly, no OpenAI compat layer.
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -480,22 +463,17 @@ async function record_recruiter_interest({ phone, email, message } = {}, ip) {
     };
   }
 
-  const results = await Promise.allSettled([
-    notifyCandidateByEmail({
+  try {
+    await notifyCandidateByEmail({
       candidateEmail: candidate?.email,
       recruiterEmail: cleanEmail,
       recruiterPhone: cleanPhone,
       message: cleanMessage,
-    }),
-    notifyRecruiterAcknowledgement({
-      recruiterEmail: cleanEmail,
-      candidateName: candidate?.name,
-    }),
-  ]);
-
-  const notified = results.some((r) => r.status === "fulfilled");
-
-  return { saved: true, notified, contact: candidate };
+    });
+    return { saved: true, notified: true, contact: candidate };
+  } catch (err) {
+    return { saved: true, notified: false, contact: candidate };
+  }
 }
 
 const toolImplementations = {

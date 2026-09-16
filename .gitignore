@@ -1,0 +1,5 @@
+node_modules/
+.env
+service-account-key.json
+env_ids.txt
+table.txt

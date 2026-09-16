@@ -431,30 +431,59 @@ const contactLimiter = rateLimit({
     error: "Too many messages sent. Please try again after 1 day.",
   },
 });
-
 app.post("/api/contact", contactLimiter, async (req, res) => {
+  console.log("[contact] ---- New request received ----");
+  console.log("[contact] Body received:", { ...req.body, message: req.body?.message ? "(present)" : req.body?.message });
+
   const { name, email, message } = req.body;
 
   if (!name || !email || !message) {
+    console.log("[contact] Validation failed — missing field(s):", {
+      hasName: !!name,
+      hasEmail: !!email,
+      hasMessage: !!message,
+    });
     return res.status(400).json({ ok: false, error: "name, email, and message are required" });
+  }
+  console.log("[contact] Validation passed.");
+
+  // --- Sanity check: is transporter even defined at this point? ---
+  console.log("[contact] typeof transporter:", typeof transporter);
+  if (typeof transporter === "undefined" || transporter === null) {
+    console.error(
+      "[contact] FATAL: `transporter` is undefined/null. It was never created, or MAIL_USER/MAIL_PASS " +
+      "were missing when it was constructed. This will throw before sendMail runs."
+    );
+    return res.status(500).json({
+      ok: false,
+      error: "Mail service is not configured on the server.",
+    });
+  }
+
+  // --- Confirm env vars are actually present in this deployed environment ---
+  console.log("[contact] MAIL_USER set:", !!process.env.MAIL_USER);
+  console.log("[contact] MAIL_PASS set:", !!process.env.MAIL_PASS);
+  if (process.env.MAIL_USER) {
+    console.log("[contact] MAIL_USER value (masked):", process.env.MAIL_USER.replace(/(.{2}).+(@.+)/, "$1***$2"));
   }
 
   try {
-    // Get the destination email from the profile table (not hardcoded MAIL_USER)
-    const profileResult = await pool.query(
-      `SELECT email FROM profile LIMIT 1;`
-    );
+    console.log("[contact] Querying profile table for recipient email...");
+    const profileResult = await pool.query(`SELECT email FROM profile LIMIT 1;`);
+    console.log("[contact] profileResult.rows:", profileResult.rows);
 
     if (profileResult.rows.length === 0 || !profileResult.rows[0].email) {
+      console.error("[contact] No recipient email found in profile table.");
       return res.status(500).json({ ok: false, error: "Recipient email not configured" });
     }
 
     const recipientEmail = profileResult.rows[0].email;
+    console.log("[contact] Recipient email resolved:", recipientEmail);
 
     const mailOptions = {
-      from: `"Portfolio Contact Form" <${process.env.MAIL_USER}>`, // must be your authenticated Gmail account
-      to: recipientEmail,          // pulled from the profile table
-      replyTo: email,              // so hitting "Reply" goes to the visitor
+      from: `"Portfolio Contact Form" <${process.env.MAIL_USER}>`,
+      to: recipientEmail,
+      replyTo: email,
       subject: `New portfolio message from ${name}`,
       text: `You received a new message via your portfolio contact form.
 
@@ -476,12 +505,35 @@ ${message}`,
       `,
     };
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log("Mail sent: " + info.response);
+    console.log("[contact] mailOptions built:", {
+      from: mailOptions.from,
+      to: mailOptions.to,
+      replyTo: mailOptions.replyTo,
+      subject: mailOptions.subject,
+    });
 
+    console.log("[contact] Calling transporter.sendMail()...");
+    const info = await transporter.sendMail(mailOptions);
+    console.log("[contact] sendMail() resolved. info:", {
+      messageId: info?.messageId,
+      response: info?.response,
+      accepted: info?.accepted,
+      rejected: info?.rejected,
+    });
+
+    console.log("[contact] SUCCESS — replying 200 to client.");
     res.json({ ok: true, message: "Your message was sent successfully!" });
   } catch (err) {
-    console.error("Failed to send mail:", err);
+    console.error("[contact] ERROR CAUGHT ------------------------------");
+    console.error("[contact] err.message:", err?.message);
+    console.error("[contact] err.name:", err?.name);
+    console.error("[contact] err.code:", err?.code);        // e.g. EAUTH, ECONNECTION, ETIMEDOUT
+    console.error("[contact] err.command:", err?.command);  // SMTP command that failed, if any
+    console.error("[contact] err.response:", err?.response); // raw SMTP server response text
+    console.error("[contact] err.responseCode:", err?.responseCode); // SMTP numeric code, e.g. 535
+    console.error("[contact] Full error object:", err);
+    console.error("[contact] ------------------------------------------");
+
     res.status(500).json({
       ok: false,
       error: "We couldn't send your message right now. Please try again in a moment.",

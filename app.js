@@ -25,8 +25,10 @@ app.use(helmet());
 // the browser will silently block them, which is why the Google login route
 // never received requests before.
 const ALLOWED_ORIGINS = [
-  "https://rishabh-azure.vercel.app", // Vite dev server — this is what your frontend is actually running on
-  // "https://your-production-domain.com", // add your deployed frontend URL here
+  "https://rishabh-azure.vercel.app", // production frontend (Vercel)
+  "http://localhost:5173",            // local Vite dev server
+  "http://localhost:3000",            // in case you also run something on 3000
+  // "https://your-custom-domain.com", // add more as needed
 ];
 
 app.use(
@@ -418,6 +420,7 @@ app.get("/api/resume", async (req, res) => {
 // Sends the submission straight to your inbox via nodemailer.
 // Table-free for now — if you also want these saved in the DB,
 // add a table back and INSERT here alongside the sendMail call.
+
 const contactLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000, 
   max: 10, 
@@ -436,20 +439,53 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     return res.status(400).json({ ok: false, error: "name, email, and message are required" });
   }
 
-  const mailOptions = {
-    from: email,
-    to: process.env.MAIL_USER,
-    subject: "New portfolio contact form submission",
-    text: `My name is ${name}. Message: ${message}\nSent from ${email}.`,
-  };
-
   try {
+    // Get the destination email from the profile table (not hardcoded MAIL_USER)
+    const profileResult = await pool.query(
+      `SELECT email FROM profile LIMIT 1;`
+    );
+
+    if (profileResult.rows.length === 0 || !profileResult.rows[0].email) {
+      return res.status(500).json({ ok: false, error: "Recipient email not configured" });
+    }
+
+    const recipientEmail = profileResult.rows[0].email;
+
+    const mailOptions = {
+      from: `"Portfolio Contact Form" <${process.env.MAIL_USER}>`, // must be your authenticated Gmail account
+      to: recipientEmail,          // pulled from the profile table
+      replyTo: email,              // so hitting "Reply" goes to the visitor
+      subject: `New portfolio message from ${name}`,
+      text: `You received a new message via your portfolio contact form.
+
+Name: ${name}
+Email: ${email}
+
+Message:
+${message}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+          <h2 style="color: #2563eb;">New Portfolio Contact Submission</h2>
+          <p><strong>Name:</strong> ${name}</p>
+          <p><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
+          <p><strong>Message:</strong></p>
+          <p style="background:#f5f5f5; padding:12px; border-radius:6px; white-space:pre-wrap;">${message}</p>
+          <hr style="border:none; border-top:1px solid #eee; margin:20px 0;" />
+          <p style="font-size:12px; color:#888;">Sent from your portfolio contact form.</p>
+        </div>
+      `,
+    };
+
     const info = await transporter.sendMail(mailOptions);
     console.log("Mail sent: " + info.response);
-    res.json({ ok: true });
+
+    res.json({ ok: true, message: "Your message was sent successfully!" });
   } catch (err) {
     console.error("Failed to send mail:", err);
-    res.status(500).json({ ok: false, error: "Failed to send message" });
+    res.status(500).json({
+      ok: false,
+      error: "We couldn't send your message right now. Please try again in a moment.",
+    });
   }
 });
 

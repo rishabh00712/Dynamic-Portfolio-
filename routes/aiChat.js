@@ -116,6 +116,8 @@ const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
 /* =========================================================
    Rate limiting — protects API quota and the DB.
+   Caps message *frequency* (bursts). The daily mail cap below
+   is a separate, independent limit on outbound emails.
    ========================================================= */
 const chatLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
@@ -150,6 +152,51 @@ setInterval(() => {
   const cutoff = Date.now() - HISTORY_TTL_MS;
   for (const [ip, entry] of conversationHistory) {
     if (entry.lastUsed < cutoff) conversationHistory.delete(ip);
+  }
+}, 60 * 60 * 1000);
+
+/* =========================================================
+   Per-IP daily mail cap for record_recruiter_interest.
+   express-rate-limit can't wrap this because it isn't a route —
+   it's a tool invoked from inside the Gemini tool-calling loop.
+   So we track it ourselves, same pattern as conversationHistory
+   above (in-memory Map + hourly sweep), to avoid an unbounded
+   memory leak from one entry per IP accumulating forever.
+
+   The lead is ALWAYS saved to the DB regardless of this cap —
+   only the outbound notification email is limited.
+   ========================================================= */
+const MAIL_DAILY_LIMIT = 10;
+const mailSendTracker = new Map(); // ip -> { count, dayKey }
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10); // e.g. "2026-09-16"
+}
+
+function canSendRecruiterMail(ip) {
+  const key = todayKey();
+  const entry = mailSendTracker.get(ip);
+
+  if (!entry || entry.dayKey !== key) {
+    // First send today (or first ever) for this IP.
+    mailSendTracker.set(ip, { count: 1, dayKey: key });
+    return true;
+  }
+
+  if (entry.count >= MAIL_DAILY_LIMIT) {
+    return false;
+  }
+
+  entry.count += 1;
+  return true;
+}
+
+// Sweep stale (not-today) entries once an hour so this Map can't
+// grow unbounded — this is the fix for the potential memory leak.
+setInterval(() => {
+  const key = todayKey();
+  for (const [ip, entry] of mailSendTracker) {
+    if (entry.dayKey !== key) mailSendTracker.delete(ip);
   }
 }, 60 * 60 * 1000);
 
@@ -397,7 +444,7 @@ async function get_resume_link() {
   return rows;
 }
 
-async function record_recruiter_interest({ phone, email, message } = {}) {
+async function record_recruiter_interest({ phone, email, message } = {}, ip) {
   const cleanPhone = phone ? String(phone).trim() : null;
   const cleanEmail = email && typeof email === "string" ? email.trim() : null;
 
@@ -407,6 +454,8 @@ async function record_recruiter_interest({ phone, email, message } = {}) {
 
   const cleanMessage = message ? String(message).trim() : null;
 
+  // Lead is always saved to the DB regardless of the daily mail cap —
+  // we never want to silently drop a recruiter's contact info.
   await pool.query(`INSERT INTO leads (email, phone, message) VALUES ($1, $2, $3);`, [
     cleanEmail,
     cleanPhone,
@@ -416,8 +465,21 @@ async function record_recruiter_interest({ phone, email, message } = {}) {
   const profileRes = await pool.query(`SELECT name, email, phone FROM profile LIMIT 1;`);
   const candidate = profileRes.rows[0] || null;
 
-  // Best-effort notifications — a failure here should never break the chat
-  // reply, so these are fired without blocking on strict success.
+  if (!mailTransporter || !candidate?.email) {
+    // No transporter configured — lead is saved either way.
+    return { saved: true, notified: false, contact: candidate };
+  }
+
+  if (!canSendRecruiterMail(ip)) {
+    console.warn(`[aiChat] Daily mail limit (${MAIL_DAILY_LIMIT}) hit for IP ${ip} — lead saved, no email sent.`);
+    return {
+      saved: true,
+      notified: false,
+      mailLimitReached: true,
+      contact: candidate,
+    };
+  }
+
   const results = await Promise.allSettled([
     notifyCandidateByEmail({
       candidateEmail: candidate?.email,
@@ -484,6 +546,7 @@ RECRUITER CONTACT CAPTURE
 - If the conversation suggests the visitor is a recruiter or hiring manager (mentions hiring, a company, a role, "we're looking for...") and they haven't given you a phone number or email yet, proactively ask for their **phone number** so he can call them directly, along with a quick note on the company/role — don't wait for them to volunteer it. Mention email as a fine alternative if they'd rather share that instead of a number.
 - As soon as you have a phone number and/or an email, call record_recruiter_interest with whichever of phone/email you have plus a short summary of the context. This saves it and notifies him directly by email — after calling it, tell the visitor warmly that you've passed it along and he may reach out to them (call or email) soon, and still offer his direct contact details as a faster alternative if they'd rather not wait.
 - If the user just asks how to contact him/her without offering their own info, simply share his contact details from get_profile_summary — no need to call record_recruiter_interest for that.
+- If record_recruiter_interest returns mailLimitReached: true, their info was still saved successfully — just tell the visitor warmly that it's been noted, and proactively share his direct contact details (email/phone from get_profile_summary) right away so they can reach him directly instead of waiting on a notification. Never mention the word "limit" or any technical reason — just move straight to offering the direct contact info.
 
 FORMATTING
 - Use **double asterisks** around anything that should render bold: names, company names, tech stack items, section labels.
@@ -554,8 +617,11 @@ async function generateContentWithRetry(params, maxRetries = 3) {
 
 /* =========================================================
    Tool-calling loop (Gemini shape)
+   `ip` is threaded through so record_recruiter_interest can
+   apply the per-IP daily mail cap. Other tools simply ignore
+   the extra argument since their signatures don't declare it.
    ========================================================= */
-async function runToolCallingLoop(contents) {
+async function runToolCallingLoop(contents, ip) {
   const MAX_ITERATIONS = 5;
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -588,7 +654,7 @@ async function runToolCallingLoop(contents) {
         resultPayload = { error: `Unknown tool: ${call.name}` };
       } else {
         try {
-          resultPayload = await fn(call.args || {});
+          resultPayload = await fn(call.args || {}, ip);
         } catch (err) {
           console.error(`Tool "${call.name}" failed:`, err);
           resultPayload = { error: "Failed to fetch that information." };
@@ -629,7 +695,7 @@ router.post("/chat", chatLimiter, async (req, res) => {
   const contents = [...history, userTurn];
 
   try {
-    const reply = await runToolCallingLoop(contents);
+    const reply = await runToolCallingLoop(contents, ip);
 
     saveHistory(ip, [
       ...history,

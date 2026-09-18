@@ -219,8 +219,17 @@ function getClientIp(req) {
 /* =========================================================
    POST /api/track-visit — fire on every page load.
    - Cookie present (they've signed in before, any time) -> log
-     their name + email from the cookie.
-   - No cookie -> log "Anonymous" + their IP address.
+     their name + email from the cookie. This is the trusted,
+     server-verified source.
+   - No cookie, but the client sent a name/email in the body
+     (read from localStorage on the frontend) -> use that as a
+     fallback. This covers mobile browsers (notably iOS/Android
+     Chrome) that block the cross-site session cookie but still
+     have the identity saved in localStorage from login. Note:
+     this fallback is client-supplied and therefore spoofable by
+     a direct API call — acceptable for a simple visit log, but
+     not a substitute for real auth.
+   - Neither present -> log "Anonymous" + their IP address.
    Always just appends a new row at the bottom. No matching, no
    updating, no per-visitor tracking — every call is independent.
    ========================================================= */
@@ -228,10 +237,17 @@ router.post("/track-visit", async (req, res) => {
   try {
     const identity = readSessionCookie(req);
 
+    const clientClaimedName = typeof req.body?.name === "string" ? req.body.name.slice(0, 200) : "";
+    const clientClaimedEmail = typeof req.body?.email === "string" ? req.body.email.slice(0, 200) : "";
+
+    const resolvedName = identity?.name || clientClaimedName || ANONYMOUS_LABEL;
+    const resolvedEmail = identity?.email || clientClaimedEmail || "";
+    const isAnonymous = !identity && !clientClaimedName;
+
     await appendVisitRow({
-      name: identity?.name || ANONYMOUS_LABEL,
-      email: identity?.email || "",
-      ip: identity ? "" : getClientIp(req),
+      name: resolvedName,
+      email: resolvedEmail,
+      ip: isAnonymous ? getClientIp(req) : "",
       visitTime: new Date(),
     });
 
@@ -270,7 +286,7 @@ router.post("/google-login", async (req, res) => {
 
     setSessionCookie(res, { name, email });
 
-    return res.json({ success: true });
+    return res.json({ success: true, name, email });
   } catch (err) {
     console.error("[googleAuthLog] Failed to verify/log Google login:", err?.response?.data || err);
     return res.status(401).json({ error: "Invalid Google credential." });

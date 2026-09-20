@@ -13,7 +13,7 @@ const helmet = require("helmet");
 
 const { BrevoClient } = require("@getbrevo/brevo");
 // Set up the Brevo API client once, outside the route handler
-const brevoClient = new BrevoClient({ apiKey: process.env.BREVO_API_KEY });
+const brevoClient = new BrevoClient({ apiKey: process.env.EMAIL_SENDING_API_KEY });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -439,9 +439,9 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
   console.log("[contact] Validation passed.");
 
   // --- Sanity check: is Brevo configured? ---
-  console.log("[contact] BREVO_API_KEY set:", !!process.env.BREVO_API_KEY);
-  if (!process.env.BREVO_API_KEY) {
-    console.error("[contact] FATAL: BREVO_API_KEY is not set. Cannot send mail.");
+  console.log("[contact] EMAIL_SENDING_API_KEY set:", !!process.env.EMAIL_SENDING_API_KEY);
+  if (!process.env.EMAIL_SENDING_API_KEY) {
+    console.error("[contact] FATAL: EMAIL_SENDING_API_KEY is not set. Cannot send mail.");
     return res.status(500).json({
       ok: false,
       error: "Mail service is not configured on the server.",
@@ -465,7 +465,7 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     const emailPayload = {
       sender: {
         name: "Portfolio Contact Form",
-        email: process.env.BREVO_SENDER_EMAIL, // must match the verified sender in Brevo
+        email: process.env.SENDER_EMAIL, // must match the verified sender in Brevo
       },
       to: [{ email: recipientEmail }],
       replyTo: { email: email, name: name },

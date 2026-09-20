@@ -24,19 +24,19 @@ const router = express.Router();
    Brevo sender can send to any recipient, not just your own
    signup email.
    ========================================================= */
-const brevoClient = process.env.BREVO_API_KEY
-  ? new BrevoClient({ apiKey: process.env.BREVO_API_KEY })
+const brevoClient = process.env.EMAIL_SENDING_API_KEY
+  ? new BrevoClient({ apiKey: process.env.EMAIL_SENDING_API_KEY })
   : null;
 
 if (!brevoClient) {
   console.warn(
-    "[aiChat] BREVO_API_KEY is not set — recruiter interest will be saved to the DB, but no email notifications (candidate or recruiter) will be sent until this is configured."
+    "[aiChat] EMAIL_SENDING_API_KEY is not set — recruiter interest will be saved to the DB, but no email notifications (candidate or recruiter) will be sent until this is configured."
   );
 }
 
 // Sender address for outbound notifications — must match a verified
 // sender in your Brevo account (Settings -> Senders, domains, IPs).
-const MAIL_FROM = { name: "Portfolio Assistant", email: process.env.BREVO_SENDER_EMAIL };
+const MAIL_FROM = { name: "Portfolio Assistant", email: process.env.SENDER_EMAIL };
 
 /* =========================================================
    Self-healing schema — the recruiter-interest flow depends on
@@ -92,10 +92,10 @@ async function notifyCandidateByEmail({ candidateEmail, recruiterEmail, recruite
   }
 }
 
-// Native Gemini client — reads GEMINI_API_KEY directly, no OpenAI compat layer.
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// Native Gemini client — reads MYAI_API_KEY directly, no OpenAI compat layer.
+const ai = new GoogleGenAI({ apiKey: process.env.MYAI_API_KEY });
 
-const MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+const MODEL = process.env.AIMODEL;
 
 /* =========================================================
    Rate limiting — protects API quota and the DB.

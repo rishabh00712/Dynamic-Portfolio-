@@ -201,7 +201,8 @@ app.get("/api/projects", async (req, res) => {
       `SELECT id, category_id, name, image_url AS image,
               short_description AS "shortDescription", description,
               tech_stack AS "techStack", why,
-              live_url AS "liveUrl", github_url AS "githubUrl"
+              live_url AS "liveUrl", github_url AS "githubUrl",
+              video_url AS "videoUrl", document_url AS "documentUrl"
        FROM projects ORDER BY position ASC;`
     );
 
@@ -216,7 +217,6 @@ app.get("/api/projects", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch projects" });
   }
 });
-
 /* ---------------- Experience ---------------- */
 app.get("/api/experience", async (req, res) => {
   try {
@@ -228,7 +228,8 @@ app.get("/api/experience", async (req, res) => {
       `SELECT id, category_id, company_name AS "companyName", role,
               image_url AS image, description, duration,
               start_date AS "startDate", end_date AS "endDate",
-              tech_stack AS "techStack", certificate_url AS "certificateUrl"
+              tech_stack AS "techStack", certificate_url AS "certificateUrl",
+              video_url AS "videoUrl", document_url AS "documentUrl"
       FROM experiences ORDER BY position ASC;`
     );
 

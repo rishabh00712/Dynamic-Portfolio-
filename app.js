@@ -464,7 +464,7 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     const emailPayload = {
       sender: {
         name: "Portfolio Contact Form",
-        email: "garairishabh@gmail.com", // must match the verified sender in Brevo
+        email: process.env.BREVO_SENDER_EMAIL, // must match the verified sender in Brevo
       },
       to: [{ email: recipientEmail }],
       replyTo: { email: email, name: name },

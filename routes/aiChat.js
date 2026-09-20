@@ -2,6 +2,12 @@
 //
 // Single route: POST /api/chat
 // Mount this in app.js with: app.use("/api", require("./routes/aiChat"));
+//
+// IMPORTANT (production, Render or any reverse-proxy host):
+// Add `app.set('trust proxy', 1);` in app.js BEFORE mounting routes.
+// Without it, req.ip below returns the proxy's IP for every visitor,
+// which silently breaks per-IP rate limiting, conversation memory,
+// and the daily mail cap (everyone collapses into one "IP").
 
 const express = require("express");
 const rateLimit = require("express-rate-limit");
@@ -114,19 +120,77 @@ const chatLimiter = rateLimit({
 
 /* =========================================================
    IP-keyed conversation memory (in-memory, resets on restart).
-   Stored in Gemini "contents" shape: [{ role: "user"|"model", parts:[{text}] }]
+
+   Two layers, kept deliberately cheap so the free-tier Gemini
+   quota is never spent just to "remember" things:
+
+   1) `history` — a SHORT sliding window of raw turns (Gemini
+      "contents" shape) for immediate back-and-forth coherence.
+      Kept small on purpose (MAX_HISTORY_MESSAGES) so every
+      request doesn't re-send a huge, ever-growing transcript.
+
+   2) `notes` — a tiny set of deterministic key-facts (plain JS,
+      NOT model-generated, so it costs zero extra API calls)
+      that survive even after the raw window has scrolled past
+      them. Right now this only tracks whether recruiter contact
+      info has already been captured, so XA never re-asks for a
+      phone/email it already has. Extend this object with more
+      flags later if needed — the point is: store key points,
+      not everything.
    ========================================================= */
-const conversationHistory = new Map(); // ip -> { history, lastUsed }
-const MAX_HISTORY_MESSAGES = 12; // ~6 user/model pairs kept per IP
+const conversationHistory = new Map(); // ip -> { history, notes, lastUsed }
+const MAX_HISTORY_MESSAGES = 8; // ~4 user/model pairs kept per IP (reduced to save tokens/quota)
 const HISTORY_TTL_MS = 24 * 60 * 60 * 1000; // forget anyone inactive for 1 day
 
+function getEntry(ip) {
+  return conversationHistory.get(ip) || { history: [], notes: {}, lastUsed: Date.now() };
+}
+
 function getHistory(ip) {
-  return conversationHistory.get(ip)?.history || [];
+  return getEntry(ip).history;
+}
+
+function getNotes(ip) {
+  return getEntry(ip).notes;
 }
 
 function saveHistory(ip, history) {
-  const trimmed = history.slice(-MAX_HISTORY_MESSAGES);
-  conversationHistory.set(ip, { history: trimmed, lastUsed: Date.now() });
+  const entry = getEntry(ip);
+  entry.history = history.slice(-MAX_HISTORY_MESSAGES);
+  entry.lastUsed = Date.now();
+  conversationHistory.set(ip, entry);
+}
+
+// Merge-patch a few key facts about this visitor. Cheap, deterministic,
+// no model call involved — just plain object state.
+function updateNotes(ip, patch) {
+  const entry = getEntry(ip);
+  entry.notes = { ...entry.notes, ...patch };
+  entry.lastUsed = Date.now();
+  conversationHistory.set(ip, entry);
+}
+
+// Turns the stored notes into a short block of plain-English reminders
+// appended to the system prompt for this request only. This is how
+// "key points" survive even after the raw history window has scrolled
+// them out, without ever re-sending the full transcript.
+function buildMemoryNote(ip) {
+  const notes = getNotes(ip);
+  const lines = [];
+
+  if (notes.contactCollected) {
+    lines.push(
+      "This visitor has ALREADY shared their contact info earlier in this conversation — do NOT ask for a phone number or email again unless they explicitly want to share a different one."
+    );
+  }
+  if (notes.lastContactContext) {
+    lines.push(`Context they gave when sharing contact earlier: "${notes.lastContactContext}"`);
+  }
+
+  if (!lines.length) return "";
+  return `\n\nCONVERSATION MEMORY (key facts remembered from earlier in this session — do not repeat questions already answered here):\n- ${lines.join(
+    "\n- "
+  )}`;
 }
 
 // Sweeps out anyone inactive for 24+ hours, once an hour, so this Map
@@ -445,6 +509,15 @@ async function record_recruiter_interest({ phone, email, message } = {}, ip) {
     cleanMessage,
   ]);
 
+  // Remember (cheaply, no extra API call) that this IP already gave
+  // contact info, so XA doesn't ask for it again later in the session.
+  if (ip) {
+    updateNotes(ip, {
+      contactCollected: true,
+      lastContactContext: cleanMessage || null,
+    });
+  }
+
   const profileRes = await pool.query(`SELECT name, email, phone FROM profile LIMIT 1;`);
   const candidate = profileRes.rows[0] || null;
 
@@ -492,14 +565,25 @@ const toolImplementations = {
 /* =========================================================
    System prompt — guidelines and rules
    (Gemini takes this as config.systemInstruction, not a message)
+
+   Built fresh per request via buildSystemPrompt() rather than
+   as a static hoisted string, so "today" is always the real
+   current date and never the model's own internal training-time
+   sense of "now". This is what fixes dates like a May 2026
+   graduation being wrongly narrated as "currently pursuing".
    ========================================================= */
-const SYSTEM_PROMPT = `
+function buildSystemPrompt() {
+  const today = new Date().toISOString().slice(0, 10); // e.g. "2026-09-20"
+
+  return `
 You are XA, a warm, sharp personal assistant who works for one specific person — the candidate whose portfolio this is. You are talking to recruiters, hiring managers, and visitors on his/her behalf. You are not a database read-out — you speak like a confident human assistant who knows this person well and genuinely wants to help them get noticed.
+
+TODAY'S REAL DATE IS ${today}. Use this exact date for every past/present/future comparison in this conversation — never rely on your own internal sense of "now", which may be out of date.
 
 IDENTITY & PRONOUNS
 - Always call get_profile_summary at least once early in a conversation (definitely on any greeting) so you know the candidate's real first name and gender.
 - Never refer to him/her as "the candidate" or say things like "the profile shows..." — speak naturally using the actual first name, e.g. "Here are that person's top projects and the skills behind them" rather than "Here is what the profile shows regarding...". Use the correct pronoun (he/him or she/her) from the "gender" field; if it's missing, favor the name over a guessed pronoun.
-- When the user just says hi/hello/hey/how are you, reply warmly using the candidate's real name (e.g. "Hi! I'm XA, [Name]'s assistant — ask me anything about his/her skills, projects, or experience.") and don't call any other tool.
+- When the user just says hi/hello/hey/how are you, call get_profile_summary to get the name (this is the one exception to "no tools on greeting" — you still need the name), then reply warmly using it (e.g. "Hi! I'm XA, [Name]'s assistant — ask me anything about his/her skills, projects, or experience.") and don't call any OTHER tool beyond that.
 
 ROUTING — WHAT TO FETCH BASED ON THE QUESTION
 - If the user gives a company name and/or a specific role (e.g. "is he a fit for a Backend Engineer role at Google"), treat this as a hiring-fit check: call get_profile_summary, get_skills, get_projects, get_experience, get_education, and get_certificates. Build the answer around whatever is most relevant, and close with the call-to-action described below.
@@ -529,6 +613,7 @@ RECRUITER CONTACT CAPTURE
 - As soon as you have a phone number and/or an email, call record_recruiter_interest with whichever of phone/email you have plus a short summary of the context. This saves it and notifies him directly by email — after calling it, tell the visitor warmly that you've passed it along and he may reach out to them (call or email) soon, and still offer his direct contact details as a faster alternative if they'd rather not wait.
 - If the user just asks how to contact him/her without offering their own info, simply share his contact details from get_profile_summary — no need to call record_recruiter_interest for that.
 - If record_recruiter_interest returns mailLimitReached: true, their info was still saved successfully — just tell the visitor warmly that it's been noted, and proactively share his direct contact details (email/phone from get_profile_summary) right away so they can reach him directly instead of waiting on a notification. Never mention the word "limit" or any technical reason — just move straight to offering the direct contact info.
+- If a CONVERSATION MEMORY note below says contact info was already collected, do NOT ask for it again — just continue the conversation naturally.
 
 FORMATTING
 - Use **double asterisks** around anything that should render bold: names, company names, tech stack items, section labels.
@@ -548,7 +633,7 @@ FORMATTING
   **{Institution}**
   {scoreCardUrl if present, bare, own line}
   {qualification}{, score if present}
-  {startDate and endDate if present, formatted as "MMM YYYY – MMM YYYY", or "MMM YYYY – Present" if endDate is missing/null; omit this line entirely if both startDate and endDate are missing}
+  {startDate and endDate formatted as "MMM YYYY – MMM YYYY" IF endDate is present AND endDate <= ${today} (a completed degree — NEVER say "pursuing", "currently studying", or "ongoing" for this, even if it feels recent); use "MMM YYYY – Present" ONLY if endDate is missing/null OR endDate is after ${today}; omit this line entirely if both startDate and endDate are missing}
   {subjects, only if present and short}
 - CERTIFICATES — for each entry:
   **{certificateName} — {organization}**
@@ -567,6 +652,7 @@ FORMATTING
 OFF-TOPIC
 - If the user asks about something unrelated to this portfolio — writing code for them, general trivia, unrelated tasks, anything not about this candidate — reply with exactly this and nothing else: "pls ask anything related to that"
 `.trim();
+}
 
 /* =========================================================
    Retry helper — Gemini's 503 UNAVAILABLE is almost always a
@@ -600,18 +686,23 @@ async function generateContentWithRetry(params, maxRetries = 3) {
 /* =========================================================
    Tool-calling loop (Gemini shape)
    `ip` is threaded through so record_recruiter_interest can
-   apply the per-IP daily mail cap. Other tools simply ignore
-   the extra argument since their signatures don't declare it.
+   apply the per-IP daily mail cap and update conversation notes.
+   Other tools simply ignore the extra argument since their
+   signatures don't declare it.
    ========================================================= */
 async function runToolCallingLoop(contents, ip) {
   const MAX_ITERATIONS = 5;
+
+  // Built once per incoming message (not per iteration) — today's date
+  // and this IP's memory notes don't change mid-loop.
+  const systemInstruction = buildSystemPrompt() + buildMemoryNote(ip);
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const response = await generateContentWithRetry({
       model: MODEL,
       contents,
       config: {
-        systemInstruction: SYSTEM_PROMPT,
+        systemInstruction,
         tools: [{ functionDeclarations: tools }],
       },
     });

@@ -36,7 +36,7 @@ if (!brevoClient) {
 
 // Sender address for outbound notifications — must match a verified
 // sender in your Brevo account (Settings -> Senders, domains, IPs).
-const MAIL_FROM = { name: "Portfolio Assistant", email: "garairishabh@gmail.com" };
+const MAIL_FROM = { name: "Portfolio Assistant", email: process.env.BREVO_SENDER_EMAIL };
 
 /* =========================================================
    Self-healing schema — the recruiter-interest flow depends on

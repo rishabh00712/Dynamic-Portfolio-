@@ -28,7 +28,7 @@ app.use(helmet());
 // never received requests before.
 const ALLOWED_ORIGINS = [
   //"https://rishabh-garai.vercel.app", // production frontend (Vercel)
-  "https://souravgarai.vercel.app/",
+  "https://souravgarai.vercel.app",
   "http://localhost:5173",            // local Vite dev server
   "http://localhost:3000",            // in case you also run something on 3000
   // "https://your-custom-domain.com", // add more as needed
